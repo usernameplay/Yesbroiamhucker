@@ -1,67 +1,82 @@
+from http.server import BaseHTTPRequestHandler
 import requests
 import re
-from fastapi import FastAPI, Response
+import json
 
-app = FastAPI()
-
-# Source M3U URL
-SOURCE_M3U = "https://raw.githubusercontent.com/codedbyakil/JioTV/refs/heads/main/jiotv.m3u"
-
-# Standard Headers from your sample
-USER_AGENT = "plaYtv/7.1.5%20(Linux%3BAndroid%2015)%20ExoPlayerLib/2.11.6%20YGX/69.69.69.69"
-COOKIE = "__hdnea__=st=1771097762~exp=1771184162~acl=/*~hmac=50a13d0d9f2107653ef128e5372b526cc1014a40fdb6a9ce0f803cd8cb227dfc"
-
-def fetch_and_format_m3u():
-    try:
-        response = requests.get(SOURCE_M3U, timeout=10)
-        if response.status_code != 200:
-            return "#EXTM3U\n# Error fetching source"
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        # Source M3U URL
+        m3u_url = "https://raw.githubusercontent.com/codedbyakil/JioTV/refs/heads/main/jiotv.m3u"
         
-        lines = response.text.splitlines()
-        new_m3u = ["#EXTM3U"]
-        
-        current_inf = ""
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-                
-            if line.startswith("#EXTINF"):
-                # Group title modify cheyyan (Sample-il ulla pole 'JioStar')
-                line = re.sub(r'group-title="[^"]*"', 'group-title="JioStar"', line)
-                current_inf = line
-                
-            elif line.startswith("http"):
-                # Oro channel link-num thazhe ningal paranja headers add cheyyunnu
-                new_m3u.append(current_inf)
-                
-                # License formatting (ClearKey logic)
-                # Note: Source-il ninnu direct key kittunnillenkil sample key default aayi vechu
-                new_m3u.append("#KODIPROP:inputstream.adaptive.license_type=clearkey")
-                new_m3u.append("#KODIPROP:inputstream.adaptive.license_key=e6afa4754bc15dd28ab6806f417d319d:6a74ef2884813547109ee96098610387")
-                
-                # Player Agent & Cookie
-                new_m3u.append(f"#EXTVLCOPT:http-user-agent={USER_AGENT}")
-                new_m3u.append(f'#EXTHTTP:{{"cookie":"{COOKIE}"}}')
-                
-                # Final Stream URL
-                new_m3u.append(line)
-                
-        return "\n".join(new_m3u)
-    
-    except Exception as e:
-        return f"#EXTM3U\n# Error: {str(e)}"
+        try:
+            # Fetching the content
+            response = requests.get(m3u_url, timeout=15)
+            if response.status_code != 200:
+                raise Exception("Failed to fetch M3U file")
+            
+            lines = response.text.splitlines()
+            channels = []
+            
+            # Temporary storage for parsing
+            current_logo = ""
+            current_name = ""
+            current_license = ""
+            current_ua = ""
+            # Static/Common Cookie as requested
+            common_cookie = "__hdnea__=st=1765186208~exp=1765272608~acl=/*~hmac=2a1acde1e0989ac181d9d91c68326b4f441aaf33e980cb8cbc693710f2e3ce17"
 
-@app.get("/")
-def home():
-    return {"status": "JioTV API is Running", "endpoint": "/playlist.m3u"}
+            for line in lines:
+                line = line.strip()
 
-@app.get("/playlist.m3u")
-def get_playlist():
-    formatted_data = fetch_and_format_m3u()
-    return Response(content=formatted_data, media_type="application/x-mpegurl")
+                # 1. User Agent Extract cheyyaan
+                if "http-user-agent=" in line:
+                    ua_match = re.search(r'http-user-agent=(.+)', line)
+                    if ua_match:
+                        current_ua = requests.utils.unquote(ua_match.group(1))
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+                # 2. Logo and Name Extract cheyyaan
+                elif line.startswith("#EXTINF:"):
+                    logo_match = re.search(r'tvg-logo="([^"]+)"', line)
+                    name_match = re.search(r',(.+)$', line)
+                    current_logo = logo_match.group(1) if logo_match else ""
+                    current_name = name_match.group(1).strip() if name_match else "Unknown"
+
+                # 3. DRM License Extract cheyyaan
+                elif "#KODIPROP:inputstream.adaptive.license_key=" in line:
+                    current_license = line.split('=')[-1]
+
+                # 4. Stream Link vannal JSON block create cheyyaan
+                elif line.startswith("http"):
+                    # Link-ile pipe symbol handle cheyyaan
+                    clean_link = line.split('|')[0]
+                    
+                    # Exact formatil data add cheyyunnu
+                    channel_obj = {
+                        "logo": current_logo,
+                        "name": current_name,
+                        "link": clean_link,
+                        "drmScheme": "clearkey",
+                        "drmLicense": current_license,
+                        "userAgent": current_ua,
+                        "cookie": common_cookie
+                    }
+                    channels.append(channel_obj)
+                    
+                    # Resetting for next channel
+                    current_logo = ""
+                    current_name = ""
+                    current_license = ""
+
+            # Sending response
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            
+            # Full JSON list output aayi nalkunnu
+            self.wfile.write(json.dumps(channels, indent=2).encode())
+
+        except Exception as e:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(f"Error: {str(e)}".encode())
