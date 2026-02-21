@@ -1,23 +1,21 @@
 from http.server import BaseHTTPRequestHandler
 import requests
 import re
-import json
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # Source M3U URL
         m3u_url = "https://raw.githubusercontent.com/codedbyakil/JioTV/refs/heads/main/jiotv.m3u"
         
         try:
-            # Fetching the content
             response = requests.get(m3u_url, timeout=15)
             if response.status_code != 200:
                 raise Exception("Failed to fetch M3U file")
             
             lines = response.text.splitlines()
-            channels = []
             
-            # Temporary storage for parsing
+            # Start with M3U Header
+            output_m3u = "#EXTM3U\n"
+            
             current_logo = ""
             current_name = ""
             current_license = ""
@@ -28,53 +26,43 @@ class handler(BaseHTTPRequestHandler):
             for line in lines:
                 line = line.strip()
 
-                # 1. User Agent Extract cheyyaan
                 if "http-user-agent=" in line:
                     ua_match = re.search(r'http-user-agent=(.+)', line)
                     if ua_match:
-                        current_ua = requests.utils.unquote(ua_match.group(1))
+                        current_ua = ua_match.group(1) # Keep encoded if needed
 
-                # 2. Logo and Name Extract cheyyaan
                 elif line.startswith("#EXTINF:"):
                     logo_match = re.search(r'tvg-logo="([^"]+)"', line)
                     name_match = re.search(r',(.+)$', line)
                     current_logo = logo_match.group(1) if logo_match else ""
                     current_name = name_match.group(1).strip() if name_match else "Unknown"
 
-                # 3. DRM License Extract cheyyaan
                 elif "#KODIPROP:inputstream.adaptive.license_key=" in line:
                     current_license = line.split('=')[-1]
 
-                # 4. Stream Link vannal JSON block create cheyyaan
                 elif line.startswith("http"):
-                    # Link-ile pipe symbol handle cheyyaan
                     clean_link = line.split('|')[0]
                     
-                    # Exact formatil data add cheyyunnu
-                    channel_obj = {
-                        "logo": current_logo,
-                        "name": current_name,
-                        "link": clean_link,
-                        "drmScheme": "clearkey",
-                        "drmLicense": current_license,
-                        "userAgent": current_ua,
-                        "cookie": common_cookie
-                    }
-                    channels.append(channel_obj)
+                    # Exact M3U Block construction
+                    output_m3u += f'#EXTINF:-1 group-title="JioStar" tvg-logo="{current_logo}" ,{current_name}\n'
+                    output_m3u += f'#KODIPROP:inputstream.adaptive.license_type=clearkey\n'
+                    output_m3u += f'#KODIPROP:inputstream.adaptive.license_key={current_license}\n'
+                    output_m3u += f'#EXTVLCOPT:http-user-agent={current_ua}\n'
+                    output_m3u += f'#EXTHTTP:{{"cookie":"{common_cookie}"}}\n'
+                    output_m3u += f'{clean_link}\n'
                     
-                    # Resetting for next channel
+                    # Reset variables for next channel
                     current_logo = ""
                     current_name = ""
                     current_license = ""
 
-            # Sending response
+            # Sending response as Plain Text (so players can read it as M3U)
             self.send_response(200)
-            self.send_header('Content-type', 'application/json')
+            self.send_header('Content-type', 'text/plain')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             
-            # Full JSON list output aayi nalkunnu
-            self.wfile.write(json.dumps(channels, indent=2).encode())
+            self.wfile.write(output_m3u.encode('utf-8'))
 
         except Exception as e:
             self.send_response(500)
