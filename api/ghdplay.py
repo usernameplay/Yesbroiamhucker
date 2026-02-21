@@ -1,70 +1,103 @@
 from http.server import BaseHTTPRequestHandler
 import requests
 import re
+import json
 
 class handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        m3u_url = "https://raw.githubusercontent.com/codedbyakil/JioTV/refs/heads/main/jiotv.m3u"
-        
+    """
+    Professional M3U to JSON Parser for Vercel Serverless Functions.
+    Converts Live M3U playlists into structured JSON format.
+    """
+    
+    def fetch_m3u_data(self, url):
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/plain, */*'
+        }
         try:
-            response = requests.get(m3u_url, timeout=15)
-            if response.status_code != 200:
-                raise Exception("Failed to fetch M3U file")
-            
-            lines = response.text.splitlines()
-            
-            # Start with M3U Header
-            output_m3u = "#EXTM3U\n"
-            
-            current_logo = ""
-            current_name = ""
-            current_license = ""
-            current_ua = ""
-            # Static/Common Cookie as requested
-            common_cookie = "__hdnea__=st=1765186208~exp=1765272608~acl=/*~hmac=2a1acde1e0989ac181d9d91c68326b4f441aaf33e980cb8cbc693710f2e3ce17"
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            return response.text
+        except requests.exceptions.RequestException as e:
+            return None
 
-            for line in lines:
-                line = line.strip()
+    def parse_content(self, raw_data):
+        channels = []
+        lines = raw_data.splitlines()
+        
+        # Temp placeholders
+        current_item = {
+            "name": None,
+            "logo": None,
+            "link": None,
+            "drmScheme": "clearkey",
+            "drmLicense": None,
+            "userAgent": None,
+            "cookie": None
+        }
 
-                if "http-user-agent=" in line:
-                    ua_match = re.search(r'http-user-agent=(.+)', line)
-                    if ua_match:
-                        current_ua = ua_match.group(1) # Keep encoded if needed
+        for line in lines:
+            line = line.strip()
+            if not line: continue
 
-                elif line.startswith("#EXTINF:"):
-                    logo_match = re.search(r'tvg-logo="([^"]+)"', line)
-                    name_match = re.search(r',(.+)$', line)
-                    current_logo = logo_match.group(1) if logo_match else ""
-                    current_name = name_match.group(1).strip() if name_match else "Unknown"
+            # Extracting Name and Logo
+            if line.startswith("#EXTINF:"):
+                logo_match = re.search(r'tvg-logo="([^"]+)"', line)
+                name_match = re.search(r',(.+)$', line)
+                current_item["logo"] = logo_match.group(1) if logo_match else ""
+                current_item["name"] = name_match.group(1).strip() if name_match else "Unknown Channel"
 
-                elif "#KODIPROP:inputstream.adaptive.license_key=" in line:
-                    current_license = line.split('=')[-1]
+            # Extracting User Agent
+            elif "http-user-agent=" in line:
+                ua_match = re.search(r'http-user-agent=([^%\s|]+(?:%20[^%\s|]+)*)', line)
+                if ua_match:
+                    current_item["userAgent"] = requests.utils.unquote(ua_match.group(1))
 
-                elif line.startswith("http"):
-                    clean_link = line.split('|')[0]
-                    
-                    # Exact M3U Block construction
-                    output_m3u += f'#EXTINF:-1 group-title="JioStar" tvg-logo="{current_logo}" ,{current_name}\n'
-                    output_m3u += f'#KODIPROP:inputstream.adaptive.license_type=clearkey\n'
-                    output_m3u += f'#KODIPROP:inputstream.adaptive.license_key={current_license}\n'
-                    output_m3u += f'#EXTVLCOPT:http-user-agent={current_ua}\n'
-                    output_m3u += f'#EXTHTTP:{{"cookie":"{common_cookie}"}}\n'
-                    output_m3u += f'{clean_link}\n'
-                    
-                    # Reset variables for next channel
-                    current_logo = ""
-                    current_name = ""
-                    current_license = ""
+            # Extracting Cookie from JSON-like EXTHTTP tag
+            elif '#EXTHTTP:{"cookie":"' in line:
+                cookie_match = re.search(r'cookie":"([^"]+)"', line)
+                if cookie_match:
+                    current_item["cookie"] = cookie_match.group(1)
 
-            # Sending response as Plain Text (so players can read it as M3U)
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            
-            self.wfile.write(output_m3u.encode('utf-8'))
+            # Extracting License Key
+            elif "license_key=" in line:
+                current_item["drmLicense"] = line.split('=')[-1]
 
-        except Exception as e:
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(f"Error: {str(e)}".encode())
+            # Extracting URL and closing the object
+            elif line.startswith("http"):
+                current_item["link"] = line.split('|')[0]
+                # Deep copy and append
+                channels.append(current_item.copy())
+                # Reset fields for next iteration
+                current_item = {k: None for k in current_item}
+                current_item["drmScheme"] = "clearkey"
+
+        return channels
+
+    def do_GET(self):
+        source_url = "https://servertvhub.site/jio/app/playlist.php"
+        raw_m3u = self.fetch_m3u_data(source_url)
+
+        if raw_m3u:
+            data = self.parse_content(raw_m3u)
+            status_code = 200
+            response_payload = {
+                "status": True,
+                "total_channels": len(data),
+                "data": data
+            }
+        else:
+            status_code = 500
+            response_payload = {
+                "status": False,
+                "message": "Unable to fetch or parse source playlist."
+            }
+
+        # Sending Response
+        self.send_response(status_code)
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Cache-Control', 's-maxage=60, stale-while-revalidate')
+        self.end_headers()
+        
+        self.wfile.write(json.dumps(response_payload, indent=2).encode('utf-8'))
